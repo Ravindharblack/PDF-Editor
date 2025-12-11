@@ -3,237 +3,162 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>PDF Editor — GitHub Pages Ready</title>
+  <title>PDF Editor — Precise Text Editing</title>
   <style>
-    :root{--accent:#0b5fff}
-    body{font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial; margin:0; background:#f6f8fb; color:#111}
-    header{background:white; padding:12px 16px; display:flex; gap:12px; align-items:center; box-shadow:0 1px 0 rgba(0,0,0,0.06)}
-    h1{font-size:16px; margin:0}
-    #uploader{display:flex; gap:8px; align-items:center}
-    #pages{padding:16px; display:flex; flex-direction:column; gap:18px}
-    .page-wrap{background:#fff; padding:12px; border-radius:8px; box-shadow:0 6px 18px rgba(11,15,30,0.04); width:fit-content}
-    .canvas-container{position:relative}
-    canvas{display:block; border:1px solid #e6e9ef}
-    .text-layer{position:absolute; left:0; top:0; pointer-events:none}
-    .text-span{position:absolute; white-space:pre; font-size:12px; transform-origin:0 0; pointer-events:auto}
-    .toolbar{margin-left:auto; display:flex; gap:8px}
-    button{background:var(--accent); color:white; border:none; padding:8px 10px; border-radius:6px; cursor:pointer}
-    button.secondary{background:#fff; color:var(--accent); border:1px solid #dbe4ff}
-    .controls{display:flex; gap:8px; align-items:center}
-    #log{font-size:13px; color:#555}
-    .small{font-size:13px}
-    /* editable input */
-    .editor-input{position:fixed; z-index:9999; border:1px solid #cbd5e1; padding:6px; border-radius:6px; background:white}
-    footer{padding:12px 16px; font-size:13px; color:#555}
+    /* Modern responsive layout */
+    body{margin:0;font-family:Inter,Arial;background:#f4f6f9;color:#111;display:flex;flex-direction:column;height:100vh}
+    header{background:white;padding:16px;display:flex;align-items:center;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,0.08);position:sticky;top:0;z-index:10}
+    h1{margin:0;font-size:18px;font-weight:600}
+    #file{padding:6px 0}
+    .btn{padding:8px 14px;border-radius:6px;border:none;cursor:pointer;font-size:14px}
+    .primary{background:#0b5fff;color:white}
+    .secondary{background:white;color:#0b5fff;border:1px solid #cfe0ff}
+    #pages{flex:1;overflow:auto;padding:20px;display:flex;flex-direction:column;align-items:center;gap:24px}
+
+    .page-wrap{background:white;padding:12px;border-radius:10px;box-shadow:0 4px 12px rgba(0,0,0,0.08)}
+
+    /* responsive canvas */
+    canvas{width:100%;height:auto;display:block;}
+
+    .text-layer{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+    .text-span{position:absolute;white-space:pre;font-family:Inter,Arial;font-size:12px;pointer-events:auto;background:rgba(255,255,0,0.0);cursor:text}
+
+    .editor-input{position:absolute;z-index:2000;padding:6px;border:1px solid #ccd2e0;border-radius:6px;font-size:14px}
   </style>
 </head>
 <body>
-  <header>
-    <h1>PDF Editor (Edit existing text) — GitHub Pages</h1>
-    <div id="uploader">
-      <input id="file" type="file" accept="application/pdf" />
-      <div class="controls">
-        <button id="download">Download edited PDF</button>
-        <button id="clear" class="secondary">Clear</button>
-      </div>
-    </div>
-    <div class="toolbar">
-      <div id="log" class="small">No file loaded</div>
-    </div>
-  </header>
 
-  <main id="pages"></main>
+<header>
+  <h1>PDF Editor (Accurate Text Editing)</h1>
+  <input id="file" type="file" accept="application/pdf" />
+  <button id="download" class="btn primary">Download PDF</button>
+  <button id="clear" class="btn secondary">Clear</button>
+  <div id="log" style="margin-left:auto;font-size:13px;color:#444">No PDF loaded</div>
+</header>
 
-  <footer>
-    Drop a PDF above. Click any visible text to edit. When you save, the editor will cover original text with a filled rectangle and write the new text into the PDF. This preserves images, tables and layout. Limitations: complex fonts/layouts may not match perfectly. 
-  </footer>
+<main id="pages"></main>
 
-  <!-- Libraries from CDNs (works on GH Pages) -->
-  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.min.js"></script>
+<!-- libs -->
+<script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.min.js"></script>
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.worker.min.js';
 
-  <script>
-    // Config for pdf.js
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.worker.min.js';
+  const pagesEl=document.getElementById('pages');
+  const fileEl=document.getElementById('file');
+  const log=document.getElementById('log');
+  let originalBytes=null;
+  let pdf=null;
+  let edits=[];
 
-    const fileInput = document.getElementById('file');
-    const pagesContainer = document.getElementById('pages');
-    const log = document.getElementById('log');
-    const downloadBtn = document.getElementById('download');
-    const clearBtn = document.getElementById('clear');
+  fileEl.addEventListener('change',async(e)=>{
+    const f=e.target.files[0];
+    if(!f) return;
+    originalBytes=await f.arrayBuffer();
+    await loadPdf(originalBytes);
+  });
 
-    let loadedPdf = null; // pdf.js PDFDocumentProxy
-    let arrayBufferOriginal = null; // original bytes
-    let edits = []; // {pageIndex, x, y, width, height, newText, fontSize}
-    
-    fileInput.addEventListener('change', async (e) => {
-      const f = e.target.files[0];
-      if(!f) return;
-      const ab = await f.arrayBuffer();
-      arrayBufferOriginal = ab.slice(0);
-      await renderPdf(ab);
-    });
+  async function loadPdf(bytes){
+    pagesEl.innerHTML=''; edits=[];
+    pdf=await pdfjsLib.getDocument({data:bytes}).promise;
+    log.textContent=`Loaded ${pdf.numPages} pages`;
 
-    clearBtn.addEventListener('click', ()=>{
-      pagesContainer.innerHTML=''; loadedPdf=null; arrayBufferOriginal=null; edits=[]; fileInput.value=''; log.textContent='Cleared';
-    });
+    for(let i=1;i<=pdf.numPages;i++){
+      const page=await pdf.getPage(i);
+      const viewport=page.getViewport({scale:2});
 
-    downloadBtn.addEventListener('click', async ()=>{
-      if(!arrayBufferOriginal){ alert('Load a PDF first'); return; }
-      log.textContent='Generating edited PDF...';
-      try{
-        const editedBytes = await applyEditsToPdf(arrayBufferOriginal, edits);
-        const blob = new Blob([editedBytes], {type:'application/pdf'});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href=url; a.download='edited.pdf'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-        log.textContent='Download ready';
-      }catch(err){ console.error(err); alert('Failed to generate PDF: '+err.message); log.textContent='Error'; }
-    });
+      const wrap=document.createElement('div');wrap.className='page-wrap';
+      const container=document.createElement('div');container.style.position='relative';
 
-    async function renderPdf(arrayBuffer){
-      pagesContainer.innerHTML=''; edits=[];
-      const loadingTask = pdfjsLib.getDocument({data:arrayBuffer});
-      loadedPdf = await loadingTask.promise;
-      log.textContent = `Loaded ${loadedPdf.numPages} pages`;
+      const canvas=document.createElement('canvas');
+      const ctx=canvas.getContext('2d');
+      canvas.width=viewport.width; canvas.height=viewport.height;
+      await page.render({canvasContext:ctx,viewport}).promise;
 
-      for(let i=1;i<=loadedPdf.numPages;i++){
-        const page = await loadedPdf.getPage(i);
-        const viewport = page.getViewport({scale:1.5});
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = Math.round(viewport.width);
-        canvas.height = Math.round(viewport.height);
-        canvas.style.width = canvas.width+'px';
-        canvas.style.height = canvas.height+'px';
+      const textLayer=document.createElement('div');textLayer.className='text-layer';
 
-        const renderContext = { canvasContext: ctx, viewport };
-        await page.render(renderContext).promise;
+      container.appendChild(canvas); container.appendChild(textLayer);
+      wrap.appendChild(container);
+      pagesEl.appendChild(wrap);
 
-        const wrap = document.createElement('div'); wrap.className='page-wrap';
-        const container = document.createElement('div'); container.className='canvas-container'; container.style.width=canvas.style.width; container.style.height=canvas.style.height;
-        const textLayer = document.createElement('div'); textLayer.className='text-layer'; textLayer.style.width=canvas.style.width; textLayer.style.height=canvas.style.height; textLayer.style.pointerEvents='none';
+      // Extract actual text positions directly from PDF
+      const textContent=await page.getTextContent();
 
-        container.appendChild(canvas); container.appendChild(textLayer); wrap.appendChild(container); pagesContainer.appendChild(wrap);
+      textContent.items.forEach((item)=>{
+        const tx=pdfjsLib.Util.transform(viewport.transform,item.transform);
+        const x=tx[4];
+        const y=tx[5];
+        const fontSize=Math.hypot(tx[1], tx[3]);
 
-        // extract text content and render transparent text spans (clickable)
-        const textContent = await page.getTextContent();
-        const viewportTransform = viewport.transform; // [a,b,c,d,e,f]
+        const span=document.createElement('div');
+        span.className='text-span'; span.textContent=item.str;
 
-        // create spans
-        textContent.items.forEach((item)=>{
-          const tx = pdfjsLib.Util.transform(viewportTransform, item.transform);
-          const x = tx[4];
-          const y = tx[5];
-          const fontHeight = Math.hypot(tx[1], tx[3]);
-          // width estimation
-          const width = item.width * viewport.scale;
+        span.style.left=x+'px';
+        span.style.top=(viewport.height-y)+'px';
+        span.style.fontSize=fontSize+'px';
 
-          const span = document.createElement('div');
-          span.className='text-span';
-          span.textContent = item.str;
-          span.style.left = x+'px';
-          // pdf.js y is from top; item.height not always available; approximate
-          span.style.top = (canvas.height - y - fontHeight)+'px';
-          span.style.fontSize = (fontHeight)+'px';
-          span.style.pointerEvents='auto';
-          span.style.background='transparent';
-          span.style.cursor='text';
-
-          // Make editable on click
-          span.addEventListener('click', (ev)=>{ ev.stopPropagation(); openEditorForSpan(span, i-1, item, viewport, canvas, page); });
-
-          textLayer.appendChild(span);
+        span.addEventListener('click',(ev)=>{
+          ev.stopPropagation();
+          openTextEditor(span, i-1, item, canvas, viewport);
         });
-      }
-    }
-
-    function openEditorForSpan(span, pageIndex, item, viewport, canvas, page){
-      // get computed position
-      const rect = span.getBoundingClientRect();
-      const bodyRect = document.body.getBoundingClientRect();
-      const left = rect.left - bodyRect.left;
-      const top = rect.top - bodyRect.top;
-      const input = document.createElement('input');
-      input.type='text'; input.className='editor-input'; input.value = span.textContent;
-      input.style.left = (left)+'px';
-      input.style.top = (top)+'px';
-      input.style.width = Math.max(80, rect.width)+'px';
-      document.body.appendChild(input);
-      input.focus();
-
-      function saveAndClose(){
-        const newText = input.value;
-        document.body.removeChild(input);
-        if(newText===span.textContent) return;
-
-        // compute coordinates in PDF points for pdf-lib
-        // PDF page size in points
-        const pdfPageWidth = page.view[2];
-        const pdfPageHeight = page.view[3];
-
-        // canvas size
-        const canvasW = canvas.width;
-        const canvasH = canvas.height;
-
-        // span position relative to canvas
-        const spanRect = span.getBoundingClientRect();
-        const canvasRect = canvas.getBoundingClientRect();
-        const relX = spanRect.left - canvasRect.left;
-        const relY = spanRect.top - canvasRect.top;
-        const fontSizePx = parseFloat(span.style.fontSize) || 12;
-
-        // convert from px (canvas space) to PDF points (pdf-lib uses points)
-        const xRatio = pdfPageWidth / canvasW;
-        const yRatio = pdfPageHeight / canvasH;
-
-        // pdf-lib origin is bottom-left. canvas (and browser) origin is top-left.
-        const pdfX = relX * xRatio;
-        const pdfY = (canvasH - (relY + fontSizePx)) * yRatio; // approximate
-
-        const width = spanRect.width * xRatio;
-        const height = fontSizePx * yRatio;
-
-        edits.push({pageIndex, x:pdfX, y:pdfY, width, height, newText, fontSize:Math.max(8, fontSizePx * xRatio)});
-
-        // show immediate change in UI by replacing span text
-        span.textContent = newText;
-        log.textContent = `Queued edit on page ${pageIndex+1}`;
-      }
-
-      input.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter') saveAndClose(); if(ev.key==='Escape'){ document.body.removeChild(input); } });
-      input.addEventListener('blur', ()=>{ if(document.body.contains(input)) saveAndClose(); });
-    }
-
-    async function applyEditsToPdf(arrayBuffer, editsList){
-      const { PDFDocument, StandardFonts, rgb } = PDFLib;
-      const pdfDoc = await PDFDocument.load(arrayBuffer);
-      const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
-
-      // group edits per page
-      const byPage = {};
-      editsList.forEach(e=>{ (byPage[e.pageIndex] = byPage[e.pageIndex] || []).push(e); });
-
-      Object.keys(byPage).forEach(piStr=>{
-        const pi = parseInt(piStr,10);
-        const page = pdfDoc.getPages()[pi];
-        const pageWidth = page.getWidth();
-        const pageHeight = page.getHeight();
-
-        byPage[pi].forEach(e=>{
-          // Draw a white rectangle over the original text area to "erase" it
-          page.drawRectangle({ x: e.x, y: e.y, width: e.width, height: e.height, color: rgb(1,1,1) });
-          // Draw the new text on top
-          page.drawText(e.newText, { x: e.x, y: e.y + (e.height*0.15), size: Math.max(8, e.fontSize), font: helv });
-        });
+        textLayer.appendChild(span);
       });
-
-      const bytes = await pdfDoc.save();
-      return bytes;
     }
+  }
 
-    // quick note: this approach attempts to accurately map visible text positions to PDF coordinates using the
-    // rendered canvas dimensions and the PDF page size. It won't be perfect for every PDF (complex fonts, rotated text,
-    // or very small text may need manual tweaking). But for common documents it works well and keeps images/tables intact.
-  </script>
+  function openTextEditor(span,pageIndex,item,canvas,viewport){
+    const rect=span.getBoundingClientRect();
+    const input=document.createElement('input');
+    input.className='editor-input';
+    input.value=span.textContent;
+    input.style.left=rect.left+'px';
+    input.style.top=rect.top+'px';
+    input.style.width=rect.width+'px';
+    document.body.appendChild(input);
+    input.focus();
+
+    input.onblur=()=>saveText(input,span,pageIndex,canvas,viewport);
+    input.onkeydown=(e)=>{if(e.key==='Enter')input.blur();};
+  }
+
+  function saveText(input,span,pageIndex,canvas,viewport){
+    const newText=input.value;
+    document.body.removeChild(input);
+    if(newText===span.textContent)return;
+
+    const rect=span.getBoundingClientRect();
+    const canvasRect=canvas.getBoundingClientRect();
+
+    const xRatio=viewport.width/canvasRect.width;
+    const yRatio=viewport.height/canvasRect.height;
+
+    const x=(rect.left-canvasRect.left)*xRatio;
+    const y=(canvasRect.height-(rect.top-canvasRect.top+rect.height))*yRatio;
+
+    edits.push({pageIndex,x,y,width:rect.width*xRatio,height:rect.height*yRatio,text:newText,size:parseFloat(span.style.fontSize)});
+
+    span.textContent=newText;
+  }
+
+  document.getElementById('download').onclick=async()=>{
+    if(!originalBytes) return alert('Upload a PDF');
+
+    const pdfDoc=await PDFLib.PDFDocument.load(originalBytes);
+    const helv=await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+
+    edits.forEach((e)=>{
+      const page=pdfDoc.getPages()[e.pageIndex];
+      page.drawRectangle({x:e.x,y:e.y,width:e.width,height:e.height,color:PDFLib.rgb(1,1,1)});
+      page.drawText(e.text,{x:e.x,y:e.y+2,size:e.size,font:helv,color:PDFLib.rgb(0,0,0)});
+    });
+
+    const out=await pdfDoc.save();
+    const blob=new Blob([out],{type:'application/pdf'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='edited.pdf';a.click();
+  };
+
+  document.getElementById('clear').onclick=()=>{pagesEl.innerHTML='';edits=[];fileEl.value='';log.textContent='Cleared';};
+</script>
+
 </body>
 </html>
