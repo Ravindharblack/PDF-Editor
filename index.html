@@ -107,7 +107,23 @@
   // --- Helpers ---
   function abToBase64(ab){ const bytes=new Uint8Array(ab); let binary=''; for(let i=0;i<bytes.length;i++) binary += String.fromCharCode(bytes[i]); return btoa(binary); }
   function base64ToAb(base64){ const binary=atob(base64); const len=binary.length; const bytes=new Uint8Array(len); for(let i=0;i<len;i++) bytes[i]=binary.charCodeAt(i); return bytes.buffer; }
-  function dataURLToUint8Array(dataURL){ const b64 = dataURL.split(',')[1]; const bin = atob(b64); const len = bin.length; const arr = new Uint8Array(len); for(let i=0;i<len;i++) arr[i]=bin.charCodeAt(i); return arr; }
+  
+  // FIXED: Improved dataURLToUint8Array to handle signature data reliably
+  function dataURLToUint8Array(dataURL){ 
+    try {
+        const parts = dataURL.split(',');
+        if (parts.length < 2) throw new Error('Invalid Data URL format');
+        const b64 = parts[1];
+        const bin = atob(b64); 
+        const len = bin.length; 
+        const arr = new Uint8Array(len); 
+        for(let i=0;i<len;i++) arr[i]=bin.charCodeAt(i); 
+        return arr; 
+    } catch (e) {
+        console.error("Error converting Data URL to Uint8Array:", e);
+        return new Uint8Array(0); // Return empty array on failure
+    }
+  }
   
   // --- History & Local Storage ---
   function pushHistory(action){ history = history.slice(0, historyPtr+1); history.push(action); historyPtr++; updateUndoRedo(); saveLocal(); replayHistory(); }
@@ -628,70 +644,83 @@
   // --- Export flattened PDF ---
   document.getElementById('download').addEventListener('click', async ()=>{
     if(!originalBytes) return alert('No PDF loaded');
-    const pdfDoc = await PDFLib.PDFDocument.load(originalBytes);
-    const helv = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
-    const actionsToApply = history.slice(0, historyPtr+1);
     
-    // Define colors for drawing
-    const white = PDFLib.rgb(1,1,1);
-    const black = PDFLib.rgb(0,0,0);
-    const highlightColor = PDFLib.rgb(1,0.95,0.2); // Yellow
-
-    for(const a of actionsToApply){ 
-      try {
-        const page = pdfDoc.getPages()[a.pageIndex]; 
+    try {
+        const pdfDoc = await PDFLib.PDFDocument.load(originalBytes);
+        const helv = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
+        const actionsToApply = history.slice(0, historyPtr+1);
         
-        if(a.type==='text-edit'){ 
-          // 1. Draw white rectangle (whiteout) over the old text area
-          page.drawRectangle({ 
-            x:a.x, 
-            y:a.y, 
-            width:a.w, 
-            height:a.h, 
-            color:white 
-          }); 
-          
-          // 2. Draw the new text
-          page.drawText(a.text, { 
-            x:a.x, 
-            y:a.y + (a.h * 0.1), // Adjusted Y to look centered
-            size:a.fontSize, 
-            font:helv, 
-            color:black 
-          }); 
-          
-        } else if(a.type==='highlight'){ 
-          page.drawRectangle({ 
-            x:a.x, 
-            y:a.y, 
-            width:a.w, 
-            height:a.h, 
-            color:highlightColor, 
-            opacity:0.25 
-          }); 
-        } else if(a.type==='signature'){ 
-          const pngBytes = dataURLToUint8Array(a.dataUrl); 
-          const img = await pdfDoc.embedPng(pngBytes); 
-          page.drawImage(img, { 
-            x:a.x || 0, 
-            y:a.y || 0, 
-            width:a.w, 
-            height:a.h 
-          }); 
+        // Define colors for drawing
+        const white = PDFLib.rgb(1,1,1);
+        const black = PDFLib.rgb(0,0,0);
+        const highlightColor = PDFLib.rgb(1,0.95,0.2); // Yellow
+
+        for(const a of actionsToApply){ 
+            if(a.type === 'load') continue; // Skip load action
+
+            const page = pdfDoc.getPages()[a.pageIndex]; 
+            
+            if(a.type==='text-edit'){ 
+                // 1. Draw white rectangle (whiteout) over the old text area
+                page.drawRectangle({ 
+                    x:a.x, 
+                    y:a.y, 
+                    width:a.w, 
+                    height:a.h, 
+                    color:white 
+                }); 
+                
+                // 2. Draw the new text
+                page.drawText(a.text, { 
+                    x:a.x, 
+                    y:a.y + (a.h * 0.1), // Adjusted Y to look centered
+                    size:a.fontSize, 
+                    font:helv, 
+                    color:black 
+                }); 
+                
+            } else if(a.type==='highlight'){ 
+                page.drawRectangle({ 
+                    x:a.x, 
+                    y:a.y, 
+                    width:a.w, 
+                    height:a.h, 
+                    color:highlightColor, 
+                    opacity:0.25 
+                }); 
+            } else if(a.type==='signature'){ 
+                const pngBytes = dataURLToUint8Array(a.dataUrl); 
+                
+                if (pngBytes.length === 0) {
+                    console.error('Skipping signature: Data URL conversion failed.');
+                    continue;
+                }
+                
+                // FIXED: Use PDFLib.PDFImage.from... for reliability
+                const img = await PDFLib.PDFImage.fromPNG(pngBytes);
+                
+                page.drawImage(img, { 
+                    x:a.x || 0, 
+                    y:a.y || 0, 
+                    width:a.w, 
+                    height:a.h 
+                }); 
+            }
         }
-      } catch (error) {
-          console.error(`Error applying action ${a.type}:`, error);
-      }
+        
+        const out = await pdfDoc.save(); 
+        const blob = new Blob([out],{type:'application/pdf'}); 
+        const url = URL.createObjectURL(blob); 
+        const downloadLink = document.createElement('a'); 
+        downloadLink.href=url; 
+        downloadLink.download='edited_flattened.pdf'; 
+        downloadLink.click(); 
+        URL.revokeObjectURL(url);
+        
+    } catch (error) {
+        console.error('PDF Export failed:', error);
+        alert('Failed to export PDF. Check the browser console for details.');
     }
-    
-    const out = await pdfDoc.save(); 
-    const blob = new Blob([out],{type:'application/pdf'}); 
-    const url = URL.createObjectURL(blob); 
-    const downloadLink = document.createElement('a'); 
-    downloadLink.href=url; 
-    downloadLink.download='edited_flattened.pdf'; 
-    downloadLink.click(); 
-    URL.revokeObjectURL(url);
   });
 
   // Save button to explicitly save to localStorage
