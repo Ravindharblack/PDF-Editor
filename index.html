@@ -23,7 +23,7 @@
     /* Text layer and spans for editing */
     .text-layer{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
     .text-span{position:absolute;white-space:pre;font-family:inherit;pointer-events:auto;cursor:text;color:#fff}
-
+    
     /* Floating toolbar & sidebar */
     .floating-toolbar{position:fixed;bottom:26px;right:26px;background:rgba(255,255,255,0.04);backdrop-filter:blur(8px);padding:10px;border-radius:12px;display:flex;gap:8px;z-index:60}
     .sidebar{position:fixed;left:12px;top:90px;width:56px;height:calc(100vh - 160px);background:rgba(255,255,255,0.03);backdrop-filter:blur(8px);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;align-items:center;z-index:50}
@@ -87,7 +87,10 @@
 <script>
   pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.6.172/build/pdf.worker.min.js';
 
-  // State
+  // --- Configuration ---
+  const TEXT_MERGE_TOLERANCE = 5; // Pixels distance for merging text fragments.
+
+  // --- State ---
   let originalBytes = null;
   let pdf = null;
   let history = [];
@@ -172,39 +175,86 @@
       wrap.appendChild(container); 
       pagesContainer.appendChild(wrap);
 
-      // extract text
+      // --- Text Aggregation and Rendering ---
       const textContent = await page.getTextContent();
-      textContent.items.forEach((item, itemIndex)=>{
-        const tx = pdfjsLib.Util.transform(viewport.transform,item.transform);
-        const x = tx[4]; const y = tx[5]; 
-        const fontSize = Math.hypot(tx[1], tx[3]); // approximated font size
-        const lineHeight = Math.hypot(item.transform[1], item.transform[3]); // approximated line height
-        
+      const items = textContent.items;
+      const aggregatedItems = [];
+      let currentBlock = null;
+
+      for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+        const item = items[itemIndex];
+        const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+        const x = tx[4];
+        const y = tx[5];
+        const width = item.width * scale;
+        const height = item.height * scale;
+        const fontSize = Math.hypot(tx[1], tx[3]) * scale;
+
+        const currentItem = {
+          str: item.str,
+          x: x,
+          y: y,
+          w: width,
+          h: height,
+          fontSize: fontSize,
+          transform: item.transform
+        };
+
+        if (currentBlock) {
+          // Check for horizontal and vertical proximity
+          const xDiff = currentItem.x - (currentBlock.x + currentBlock.w);
+          const yDiff = Math.abs(currentItem.y - currentBlock.y);
+
+          if (yDiff < currentBlock.h / 2 && xDiff < TEXT_MERGE_TOLERANCE) {
+            // Merge the current item into the current block
+            currentBlock.str += item.str;
+            currentBlock.w = currentItem.x + currentItem.w - currentBlock.x; // Expand width
+            currentBlock.h = Math.max(currentBlock.h, currentItem.h); // Maintain max height
+          } else {
+            // Start a new block
+            aggregatedItems.push(currentBlock);
+            currentBlock = currentItem;
+          }
+        } else {
+          // Initialize the first block
+          currentBlock = currentItem;
+        }
+      }
+      if (currentBlock) {
+        aggregatedItems.push(currentBlock);
+      }
+
+      // Render aggregated items as text spans
+      aggregatedItems.forEach((block, blockIndex) => {
         const span = document.createElement('div'); 
         span.className='text-span'; 
-        span.textContent = item.str;
+        span.textContent = block.str.trim();
         
         // Critical for mapping edits!
-        span.dataset.id = `${i-1}-${itemIndex}`; 
-        span.dataset.originalText = item.str;
-        span.dataset.x = x; // PDF-Lib X (bottom-left origin)
-        span.dataset.y = y; // PDF-Lib Y
-        span.dataset.w = item.width * scale; // Estimated scaled width
-        span.dataset.h = lineHeight * scale; // Estimated scaled height
-        span.dataset.fontSize = fontSize * scale; // Estimated scaled font size
+        span.dataset.id = `${i-1}-${blockIndex}`; 
+        span.dataset.originalText = block.str.trim();
+        
+        // Store coordinates and dimensions relative to PDF-Lib scale (1.0)
+        span.dataset.x = block.x / scale;
+        span.dataset.y = block.y / scale;
+        span.dataset.w = block.w / scale;
+        span.dataset.h = block.h / scale;
+        span.dataset.fontSize = block.fontSize / scale;
 
         // Position relative to canvas pixel size (viewport size)
-        span.style.left = (x/viewport.width*100)+'%'; 
-        // Y coordinate needs inversion: (viewport.height - y)
-        span.style.top = ((viewport.height - y)/viewport.height*100)+'%'; 
-        span.style.fontSize = (fontSize/viewport.height*100)+'%'; 
+        span.style.left = (block.x/viewport.width*100)+'%'; 
+        // Y coordinate needs inversion: (viewport.height - y_coord)
+        span.style.top = ((viewport.height - block.y)/viewport.height*100)+'%'; 
+        span.style.width = (block.w/viewport.width*100)+'%';
+        span.style.height = (block.h/viewport.height*100)+'%';
+        span.style.fontSize = (block.fontSize/viewport.height*100)+'%'; 
         span.style.pointerEvents='auto';
         span.style.transform = 'translateY(-100%)'; // Align baseline
 
         // click to edit
         span.addEventListener('click', (ev)=>{ 
           ev.stopPropagation(); 
-          openTextEditor(span, i-1, item, canvas, viewport); 
+          openTextEditor(span, i-1, block, canvas, viewport); 
         });
         textLayer.appendChild(span);
       });
@@ -228,7 +278,7 @@
   document.getElementById('nav-prev').onclick = ()=>{ if(currentPageIndex > 0) scrollToPage(currentPageIndex-1); };
 
   // --- Text Editing Logic ---
-  async function openTextEditor(span,pageIndex,item,canvas,viewport){ 
+  async function openTextEditor(span,pageIndex,block,canvas,viewport){ 
     const rect = span.getBoundingClientRect(); 
     const input = document.createElement('input'); 
     input.className='editor-input'; 
@@ -255,18 +305,12 @@
       span.textContent = newText;
       span.dataset.editedText = newText;
 
-      // Compute coordinates for PDF-Lib (bottom-left origin)
-      const canvasRect = canvas.getBoundingClientRect(); 
-      const xRatio = canvas.width / canvasRect.width; 
-      const yRatio = canvas.height / canvasRect.height; 
-      
-      // Calculate coordinates relative to canvas (not document)
-      const pdfX = (rect.left - canvasRect.left) * xRatio; 
-      const pdfW = rect.width * xRatio; 
-      const pdfH = rect.height * yRatio; 
-
-      // PDF Y is bottom-left origin: Canvas_Height - (Top_of_Span_from_Canvas + Span_Height) * Y_Ratio
-      const pdfY = (canvasRect.height - (rect.top - canvasRect.top + rect.height)) * yRatio;
+      // Use the stored PDF-Lib coordinates (already scaled to 1.0)
+      const pdfX = parseFloat(span.dataset.x);
+      const pdfY = parseFloat(span.dataset.y);
+      const pdfW = parseFloat(span.dataset.w);
+      const pdfH = parseFloat(span.dataset.h);
+      const pdfFontSize = parseFloat(span.dataset.fontSize);
       
       const action = {
         type:'text-edit',
@@ -277,7 +321,7 @@
         w: pdfW,
         h: pdfH,
         text: newText,
-        fontSize: parseFloat(span.dataset.fontSize) / scale // Revert to PDF-Lib scale
+        fontSize: pdfFontSize
       }; 
       pushHistory(action); 
     };
@@ -293,12 +337,14 @@
     const target = pagesEls[action.pageIndex]; 
     if(!target) return;
     
+    // Coordinates are stored at scale 1.0 (PDFLib coordinates)
     // Convert PDF coordinates (bottom-left origin) to screen percentage (top-left origin)
-    const xPct = (action.x / target.canvas.width * 100) + '%';
+    const xPct = (action.x / target.canvas.width * 100 * target.viewport.scale) + '%';
+    const wPct = (action.w / target.canvas.width * 100 * target.viewport.scale) + '%';
+    const hPct = (action.h / target.canvas.height * 100 * target.viewport.scale) + '%';
     // Y must be inverted and adjusted for height: (H_Canvas - Y_PDF - H_Action) / H_Canvas * 100
-    const yPct = ((target.canvas.height - action.y - action.h) / target.canvas.height * 100) + '%';
-    const wPct = (action.w / target.canvas.width * 100) + '%';
-    const hPct = (action.h / target.canvas.height * 100) + '%';
+    const yPct = ((target.canvas.height - (action.y * target.viewport.scale) - (action.h * target.viewport.scale)) / target.canvas.height * 100) + '%';
+    
 
     if(action.type==='text-edit'){ 
       // 1. Draw a white box to hide the original canvas text (white-out)
@@ -447,12 +493,12 @@
     const xRatio = pageObj.canvas.width / canvasRect.width; 
     const yRatio = pageObj.canvas.height / canvasRect.height; 
     
-    // PDF coordinates (bottom-left origin)
-    const pdfX = left * xRatio;
-    const pdfW = width * xRatio;
-    const pdfH = height * yRatio;
+    // PDF coordinates (bottom-left origin, scaled to 1.0)
+    const pdfX = left * xRatio / pageObj.viewport.scale;
+    const pdfW = width * xRatio / pageObj.viewport.scale;
+    const pdfH = height * yRatio / pageObj.viewport.scale;
     // Y inversion: Canvas_Height - (Top_of_Highlight_from_Canvas + Height) * Y_Ratio
-    const pdfY = (canvasRect.height - (top + height)) * yRatio;
+    const pdfY = (canvasRect.height - (top + height)) * yRatio / pageObj.viewport.scale;
 
     const action = {
         type:'highlight', 
@@ -518,16 +564,15 @@
     overlay.addEventListener('pointerup', async e=>{ 
         drawing=false; 
         
-        // Find bounding box of the drawing (simplified for demo: use full canvas dimensions)
         const dataUrl = overlay.toDataURL('image/png'); 
         
         // Coordinates for PDF-Lib (full page)
         const action = {
             type:'signature', 
             pageIndex:currentPageIndex, 
-            x:0, y:0, // Assuming full page coverage for simplicity
-            w:overlay.width, 
-            h:overlay.height, 
+            x:0, y:0, // Simplified: use full page coverage
+            w:overlay.width / pageObj.viewport.scale, 
+            h:overlay.height / pageObj.viewport.scale, 
             dataUrl
         }; 
         pushHistory(action); 
@@ -539,11 +584,11 @@
 
   // --- Zoom buttons ---
   document.getElementById('zoom-in').onclick = ()=>{ 
-    if (zoomScale < 1.8) zoomScale += 0.2; 
+    if (zoomScale < 1.8) zoomScale = Math.min(1.8, zoomScale + 0.2); 
     pagesContainer.style.transform = `scale(${zoomScale})`; 
   };
   document.getElementById('zoom-out').onclick = ()=>{ 
-    if (zoomScale > 0.4) zoomScale -= 0.2; 
+    if (zoomScale > 0.4) zoomScale = Math.max(0.4, zoomScale - 0.2); 
     pagesContainer.style.transform = `scale(${zoomScale})`; 
   };
 
